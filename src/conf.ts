@@ -1,0 +1,1 @@
+export const FA_HOST = "localhost:8000";

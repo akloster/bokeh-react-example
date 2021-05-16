@@ -1,0 +1,22 @@
+version: '3.7'
+
+services:
+  app:
+    container_name: bra-app
+    build:
+      context: .
+      dockerfile: dockerfiles/react/Dockerfile
+    ports:
+      - 3000:3000
+    volumes:
+      - '.:/app'
+      - '/app/node_modules'
+  serve:
+    container_name: bra-serve
+    build:
+      context: .
+      dockerfile: dockerfiles/fastapi/Dockerfile
+    ports:
+      - 8000:8000
+    volumes:
+      - '.:/app'
