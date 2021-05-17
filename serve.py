@@ -2,6 +2,8 @@ from base64 import b64encode
 from time import time
 from asyncio import sleep
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
+import websockets.exceptions
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -10,6 +12,7 @@ import bokeh.embed
 import bokeh.protocol
 from bokeh.plotting import figure, Document
 import numpy as np
+import json
 
 app = FastAPI()
 
@@ -36,16 +39,6 @@ def bokeh_simple():
     y = np.cos(x)
     points = p.line(x, y, width=7, alpha=0.5)
     return bokeh.embed.json_item(p)
-def serialize_events(events):
-    msg = bokeh.protocol.Protocol().create("PATCH-DOC", events)
-
-    buffers = []
-    for header, payload in msg.buffers:
-        buffers.append((header, b64encode(payload).decode('ascii')))
-    return dict(header=msg.header_json,
-                metadata=msg.metadata_json,
-                content=msg.content_json, 
-                buffers=buffers)
 
 
 @app.websocket("/bokeh/ws")
@@ -85,12 +78,37 @@ async def websocket_endpoint(websocket: WebSocket):
             x = np.linspace(-16, 16, 200)+t * 1.5
             y = np.cos(x)
             points.data_source.data.update({'x':x, 'y':y})
-            updates = serialize_events(doc._held_events)
+            buffers, updates = serialize_events(doc._held_events)
             doc._held_events = []
+            # Buffer messages alternate between a json header and binary data
+            for buffer in buffers:
+                if isinstance(buffer, dict):
+                    await websocket.send_bytes(json.dumps(buffer).encode("ascii"))
+                else:
+                    await websocket.send_bytes(buffer)
             try:
                 await websocket.send_json(dict(type="update", updates=updates))
             except TypeError:
                 print(updates)
             await sleep(1 / 25)
-    except WebSocketDisconnect:
-        pass
+    # FastAPI docs say WebSocketDisconnect should be raised. Most often, it's not...
+    except (WebSocketDisconnect, ConnectionClosedError, ConnectionClosedOK) as e:
+        print("Disconnect")
+        doc.clear()
+    print("finish")
+def serialize_events(events):
+    msg = bokeh.protocol.Protocol().create("PATCH-DOC", events)
+
+    # The Bokeh protocol makes a difference between content and buffers.
+    # The "content" is a JSON-serializable  object, whereas buffers
+    # are arrays of binary data.
+    # These buffers will be send as binary messages for efficiency.
+    buffers = []
+    for header, payload in msg.buffers:
+        buffers.append(header)
+        buffers.append(payload)
+    
+    return buffers, dict(header=msg.header_json,
+                metadata=msg.metadata_json,
+                content=msg.content_json, 
+                )

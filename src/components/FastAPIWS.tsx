@@ -2,15 +2,6 @@ import Switch from '@material-ui/core/Switch';
 import React, {useEffect, useRef, useState} from 'react';
 import { useBokeh } from '../useBokeh';
 import {FA_HOST} from '../conf';
-function base64ToArrayBuffer(base64:any) {
-    var binary_string =  window.atob(base64);
-    var len = binary_string.length;
-    var bytes = new Uint8Array( len );
-    for (var i = 0; i < len; i++)        {
-        bytes[i] = binary_string.charCodeAt(i);
-    }
-    return bytes.buffer;
-}
 
 export function FastAPIWS(){
     const containerRef: React.RefObject<HTMLDivElement> = useRef(null);
@@ -22,21 +13,22 @@ export function FastAPIWS(){
 
     const connect = function(){
         var ws = new WebSocket(`ws://${FA_HOST}/bokeh/ws`);
+        ws.binaryType = "arraybuffer";
         setWebsocket(ws);
     };
     const disconnect = function() {
         if (websocket!==null){
             // avoid state changes after component unmount
-            websocket.removeEventListener("onclose", onClose);
-            websocket.removeEventListener("onerror", onClose);
+            websocket.removeEventListener("close", onClose);
+            websocket.removeEventListener("error", onClose);
             // close socket
             websocket.close();
         }
     };
     const toggleRunning = function () {
         if (running && websocket!==null){
-            setRunning(false);
             disconnect();
+            setRunning(false);
         } else if (!running && websocket!== null){
             connect();
         };
@@ -51,8 +43,10 @@ export function FastAPIWS(){
     useEffect(()=>{
             // Runs every time there is a new websocket, i.e. new connection
             if (websocket!==null){
-                websocket.onmessage = function (event) {
-                    const data: any = JSON.parse(event.data);
+                const handler = function (event: any) {
+                    if (event.data.byteLength) return;
+                    var data_ = JSON.parse(event.data);
+                    const data = data_;
                     if (data.type === "initial") {
                         if (containerRef && containerRef.current) {
                             // destroy old plots if any
@@ -61,39 +55,49 @@ export function FastAPIWS(){
                                 if (views[0].model.document !== null) {
                                     setDoc(views[0].model.document);
                                     setRunning(true);
+                                    websocket.removeEventListener("onmessage", handler);
                                 }
                             });
                         }
                     };
                 };
+                websocket.addEventListener("message", handler);
                 const onClose = function () {
                     setRunning(false);
                 };
-                websocket.addEventListener("onclose", onClose);
-                websocket.addEventListener("onerror", onClose);
+                websocket.addEventListener("close", onClose);
+                websocket.addEventListener("error", onClose);
 
-                // keep onClose function for disconnecting late
-                setOnClose(onClose)
-
+                // keep handler for disconnecting later
+                setOnClose(()=>onClose)
             }
     }, [websocket]);
     useEffect(function(){
+        var buffers: any[] = [];
+        const enc = new TextDecoder("utf-8");
         // Runs when the Document has been embedded
         if (websocket !==null && doc !==null) {
             const receiver = new Bokeh.protocol.Receiver();
+            
             // replace onmessage handler
-            websocket.onmessage = function (event){
+            const handler = function (event: MessageEvent){
+                //    if it's binary, append to buffers
+                if (event.data.byteLength){
+                    buffers.push(event.data)
+                } else {
                 // Parse Update message and patch document
                 const data: any = JSON.parse(event.data);
                 if (data.type === "update") {
-                    const { header, metadata, content, buffers } = data.updates;
+                    const { header, metadata, content} = data.updates;
                     receiver.consume(header);
                     receiver.consume(metadata);
                     receiver.consume(content);
-                    buffers.forEach(function (buffer:any) {
-                        receiver.consume(JSON.stringify(buffer[0]));
-                        receiver.consume(base64ToArrayBuffer(buffer[1]));
-                    });
+                    // buffers are alternating between text and binary
+                    for (let i=0; i<buffers.length; i++){
+                        const buffer = (i%2==0) ? enc.decode(buffers[i]) : buffers[i]
+                        receiver.consume(buffer);
+                    }
+                    buffers = [];
                     const msg = receiver.message;
                     try {
                         if (msg != null && doc != null)
@@ -102,12 +106,13 @@ export function FastAPIWS(){
                         // If this fails, it's usually because the model ids
                         // from the ws data and the current document don't match up
                         // anymore, usually because of the Hot Reloading.
-                        console.log(error);
                         disconnect();
                         setRunning(false);
                     }
                 }
             }
+            };
+            websocket.addEventListener("message", handler);
         }
         // Cleanup document (and destroy plots etc) 
         return function(){
